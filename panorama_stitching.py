@@ -7,36 +7,28 @@ import time
 from collections import deque
 
 
-# ---------------------------------------------------------
-# Параметры (их удобно менять в одном месте)
-# ---------------------------------------------------------
-
 MIN_IMAGES = 2
 MAX_IMAGES = 10
 
-MAX_IMAGE_SIZE = 1400        # длинная сторона фото после уменьшения
-RATIO_TEST = 0.75            # порог ratio test (меньше = строже)
-RANSAC_THRESHOLD = 3.0       # допустимая ошибка в пикселях
-MIN_INLIERS = 15             # минимум RANSAC-инлайеров для связи двух фото
-MIN_INLIER_RATIO = 0.25      # минимальная доля инлайеров
+MAX_IMAGE_SIZE = 1400        
+RATIO_TEST = 0.75          
+RANSAC_THRESHOLD = 3.0     
+MIN_INLIERS = 15           
+MIN_INLIER_RATIO = 0.25    
 
-MAX_CANVAS_SIDE = 6000       # максимальная сторона итоговой панорамы
+MAX_CANVAS_SIDE = 6000       
 MAX_CANVAS_PIXELS = 25_000_000
 
-# Папка results создаётся рядом со скриптом, а не там, откуда запущен VS Code
 RESULTS_FOLDER = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "results"
 )
 
 
-# ---------------------------------------------------------
-# 1. Загрузка и уменьшение изображения
-# ---------------------------------------------------------
+
 
 def load_image(path):
-    # cv2.imread не умеет читать пути с русскими буквами на Windows
-    # (например C:\Users\Анна\...), поэтому читаем через numpy.
+
     try:
         data = np.fromfile(path, dtype=np.uint8)
         return cv2.imdecode(data, cv2.IMREAD_COLOR)
@@ -62,14 +54,11 @@ def resize_image(image, max_size=MAX_IMAGE_SIZE):
     return image
 
 
-# ---------------------------------------------------------
-# 2. Подготовка изображения и поиск признаков
-# ---------------------------------------------------------
+
 
 def prepare_image(image):
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
-    # Улучшение локального контраста
     clahe = cv2.createCLAHE(
         clipLimit=2.0,
         tileGridSize=(8, 8)
@@ -79,7 +68,7 @@ def prepare_image(image):
 
 
 def extract_features(image):
-    # Признаки считаем ОДИН раз для каждого фото
+
     gray = prepare_image(image)
 
     sift = cv2.SIFT_create(
@@ -89,10 +78,6 @@ def extract_features(image):
 
     return sift.detectAndCompute(gray, None)
 
-
-# ---------------------------------------------------------
-# 3. Сопоставление двух ИСХОДНЫХ фотографий
-# ---------------------------------------------------------
 
 def match_pair(features_i, features_j):
     """
@@ -167,12 +152,6 @@ def match_pair(features_i, features_j):
         "inliers": int(mask.sum()),
         "n_matches": len(good_matches),
     }
-
-
-# ---------------------------------------------------------
-# 4. Проверка Homography
-# ---------------------------------------------------------
-
 def check_homography(H, image_shape):
 
     if H is None or not np.isfinite(H).all():
@@ -187,7 +166,7 @@ def check_homography(H, image_shape):
         [0, height]
     ])
 
-    # Все углы должны оставаться "перед камерой"
+
     denominator = (
         H[2, 0] * corners[:, 0]
         + H[2, 1] * corners[:, 1]
@@ -202,8 +181,7 @@ def check_homography(H, image_shape):
         H
     ).reshape(-1, 2)
 
-    # Четырёхугольник должен быть выпуклым и не "вывернутым"
-    # (иначе фото зеркалится или складывается)
+
     for k in range(4):
         a = warped[k]
         b = warped[(k + 1) % 4]
@@ -217,7 +195,7 @@ def check_homography(H, image_shape):
         if cross <= 0:
             return False
 
-    # Площадь не должна меняться "безумно"
+
     x = warped[:, 0]
     y = warped[:, 1]
 
@@ -231,15 +209,8 @@ def check_homography(H, image_shape):
     return 0.2 < ratio < 5.0
 
 
-# ---------------------------------------------------------
-# 5. Граф связей между фотографиями
-# ---------------------------------------------------------
-
 def build_match_graph(images, features, names):
-    """
-    Сопоставляет ВСЕ пары фото. Поэтому порядок, в котором
-    пользователь выбрал файлы, больше не важен.
-    """
+
 
     edges = {}
 
@@ -275,10 +246,7 @@ def build_match_graph(images, features, names):
 
 
 def build_spanning_tree(count, edges):
-    """
-    Максимальное остовное дерево: оставляем только самые
-    надёжные связи (с наибольшим числом инлайеров).
-    """
+
 
     parent = list(range(count))
 
@@ -329,11 +297,6 @@ def bfs(adjacency, start):
 
 
 def compute_global_transforms(count, edges, tree):
-    """
-    Выбирает опорное фото (центр цепочки) и считает матрицу
-    для каждого фото относительно него.
-    Центральное опорное фото сильно уменьшает искажения по краям.
-    """
 
     adjacency = {k: [] for k in range(count)}
 
@@ -341,7 +304,7 @@ def compute_global_transforms(count, edges, tree):
         adjacency[i].append(j)
         adjacency[j].append(i)
 
-    # Находим самую большую связную группу
+
     visited = set()
     best_component = []
 
@@ -356,8 +319,6 @@ def compute_global_transforms(count, edges, tree):
         if len(order) > len(best_component):
             best_component = order
 
-    # Опорное фото = то, от которого до самого дальнего
-    # фото меньше всего "шагов"
     reference = None
     best_eccentricity = None
 
@@ -378,7 +339,6 @@ def compute_global_transforms(count, edges, tree):
 
         p = parent[node]
 
-        # H переводит фото node -> фото p
         if (p, node) in edges:
             H_node_to_p = edges[(p, node)]["H"]
         else:
@@ -390,15 +350,10 @@ def compute_global_transforms(count, edges, tree):
     return reference, transforms
 
 
-# ---------------------------------------------------------
-# 6. Сборка итоговой панорамы
-# ---------------------------------------------------------
-
 def render_panorama(images, transforms):
 
     ids = sorted(transforms)
 
-    # Границы холста по углам ВСЕХ фото
     all_corners = []
 
     for k in ids:
@@ -429,7 +384,7 @@ def render_panorama(images, transforms):
             "Совпадения, вероятно, определены неправильно."
         )
 
-    # Если панорама огромная - не отказываемся, а уменьшаем
+
     scale = min(
         1.0,
         MAX_CANVAS_SIDE / max(width, height),
@@ -468,8 +423,7 @@ def render_panorama(images, transforms):
             flags=cv2.INTER_LINEAR
         )
 
-        # Маска строится из самой геометрии фото, а не из "пиксели != 0",
-        # поэтому тёмные участки снимка не считаются пустыми
+
         mask = cv2.warpPerspective(
             np.full(images[k].shape[:2], 255, np.uint8),
             M,
@@ -477,10 +431,9 @@ def render_panorama(images, transforms):
             flags=cv2.INTER_NEAREST
         )
 
-        # Убираем тонкую рамку на краю фото
         mask = cv2.erode(mask, kernel)
 
-        # Feather: вес пикселя = расстояние до края своего фото
+        # Feather:
         weight = cv2.distanceTransform(
             mask,
             cv2.DIST_L2,
@@ -496,7 +449,6 @@ def render_panorama(images, transforms):
     panorama[valid] = accumulator[valid] / weight_sum[valid][:, None]
     panorama = np.uint8(np.clip(panorama, 0, 255))
 
-    # Обрезка пустых полей по краям
     points = cv2.findNonZero(valid.astype(np.uint8))
 
     if points is not None:
@@ -505,10 +457,6 @@ def render_panorama(images, transforms):
 
     return panorama
 
-
-# ---------------------------------------------------------
-# 7. Главная функция склейки
-# ---------------------------------------------------------
 
 def build_panorama(images, names, results_folder=RESULTS_FOLDER):
 
@@ -548,7 +496,7 @@ def build_panorama(images, names, results_folder=RESULTS_FOLDER):
     print()
     print(f"Опорное (центральное) фото: {names[reference]}")
 
-    # Визуализация совпадений для связей, которые реально использованы
+
     total_matches = 0
     total_inliers = 0
 
@@ -595,10 +543,6 @@ def build_panorama(images, names, results_folder=RESULTS_FOLDER):
     return panorama, info
 
 
-# ---------------------------------------------------------
-# 8. Показ результата
-# ---------------------------------------------------------
-
 def show_panorama(panorama):
 
     height, width = panorama.shape[:2]
@@ -618,7 +562,6 @@ def show_panorama(panorama):
 
     cv2.imshow(title, view)
 
-    # Цикл вместо waitKey(0): окно можно закрыть и крестиком
     while True:
         key = cv2.waitKey(100)
 
@@ -630,10 +573,6 @@ def show_panorama(panorama):
 
     cv2.destroyAllWindows()
 
-
-# ---------------------------------------------------------
-# 9. Выбор фотографий
-# ---------------------------------------------------------
 
 def select_images():
 
@@ -671,7 +610,7 @@ def select_images():
     root.update()
 
     try:
-        # Загрузка
+
         images = []
         names = []
 
@@ -689,7 +628,7 @@ def select_images():
             images.append(resize_image(image))
             names.append(os.path.basename(path))
 
-        # Склейка
+    
         try:
             panorama, info = build_panorama(images, names)
 
@@ -701,8 +640,6 @@ def select_images():
                 f"30-50% общего изображения."
             )
             return
-
-        # Сохранение
         output_path = os.path.join(
             RESULTS_FOLDER,
             "panorama_final.jpg"
@@ -710,7 +647,7 @@ def select_images():
 
         cv2.imwrite(output_path, panorama)
 
-        # Статистика
+        
         processing_time = time.time() - start_time
         height, width = panorama.shape[:2]
 
@@ -757,9 +694,7 @@ def select_images():
         status_label.config(text="")
 
 
-# ---------------------------------------------------------
-# 10. Главное окно
-# ---------------------------------------------------------
+
 
 if __name__ == "__main__":
 
