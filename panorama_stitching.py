@@ -11,19 +11,22 @@ MIN_IMAGES = 2
 MAX_IMAGES = 10
 
 MAX_IMAGE_SIZE = 1400        
-RATIO_TEST = 0.75          
-RANSAC_THRESHOLD = 3.0     
-MIN_INLIERS = 15           
-MIN_INLIER_RATIO = 0.25    
+RATIO_TEST = 0.75            
+RANSAC_THRESHOLD = 3.0       
+MIN_INLIERS = 15             
+MIN_INLIER_RATIO = 0.25      
 
 MAX_CANVAS_SIDE = 6000       
 MAX_CANVAS_PIXELS = 25_000_000
+
+
+CROP_TO_RECTANGLE = True
+
 
 RESULTS_FOLDER = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "results"
 )
-
 
 
 
@@ -55,7 +58,6 @@ def resize_image(image, max_size=MAX_IMAGE_SIZE):
 
 
 
-
 def prepare_image(image):
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
@@ -68,7 +70,7 @@ def prepare_image(image):
 
 
 def extract_features(image):
-
+ 
     gray = prepare_image(image)
 
     sift = cv2.SIFT_create(
@@ -102,7 +104,7 @@ def match_pair(features_i, features_j):
         k=2
     )
 
-    # Ratio Test
+    
     good_matches = []
 
     for pair in raw_matches:
@@ -152,6 +154,9 @@ def match_pair(features_i, features_j):
         "inliers": int(mask.sum()),
         "n_matches": len(good_matches),
     }
+
+
+
 def check_homography(H, image_shape):
 
     if H is None or not np.isfinite(H).all():
@@ -165,7 +170,6 @@ def check_homography(H, image_shape):
         [width, height],
         [0, height]
     ])
-
 
     denominator = (
         H[2, 0] * corners[:, 0]
@@ -209,8 +213,12 @@ def check_homography(H, image_shape):
     return 0.2 < ratio < 5.0
 
 
-def build_match_graph(images, features, names):
 
+def build_match_graph(images, features, names):
+    """
+    Сопоставляет ВСЕ пары фото. Поэтому порядок, в котором
+    пользователь выбрал файлы, больше не важен.
+    """
 
     edges = {}
 
@@ -246,7 +254,10 @@ def build_match_graph(images, features, names):
 
 
 def build_spanning_tree(count, edges):
-
+    """
+    Максимальное остовное дерево: оставляем только самые
+    надёжные связи (с наибольшим числом инлайеров).
+    """
 
     parent = list(range(count))
 
@@ -297,6 +308,11 @@ def bfs(adjacency, start):
 
 
 def compute_global_transforms(count, edges, tree):
+    """
+    Выбирает опорное фото (центр цепочки) и считает матрицу
+    для каждого фото относительно него.
+    Центральное опорное фото сильно уменьшает искажения по краям.
+    """
 
     adjacency = {k: [] for k in range(count)}
 
@@ -304,7 +320,7 @@ def compute_global_transforms(count, edges, tree):
         adjacency[i].append(j)
         adjacency[j].append(i)
 
-
+    
     visited = set()
     best_component = []
 
@@ -339,6 +355,7 @@ def compute_global_transforms(count, edges, tree):
 
         p = parent[node]
 
+
         if (p, node) in edges:
             H_node_to_p = edges[(p, node)]["H"]
         else:
@@ -348,6 +365,95 @@ def compute_global_transforms(count, edges, tree):
         transforms[node] = H_total / H_total[2, 2]
 
     return reference, transforms
+
+
+def largest_inscribed_rectangle(mask):
+    """
+    Ищет самый большой прямоугольник, целиком лежащий внутри
+    области mask (True = есть изображение).
+    Возвращает (x, y, ширина, высота).
+    """
+
+    height, width = mask.shape
+
+    heights = [0] * width
+
+    best_area = 0
+    best_rect = (0, 0, 0, 0)
+
+    for row in range(height):
+
+        row_values = mask[row].tolist()
+
+        for col in range(width):
+            heights[col] = heights[col] + 1 if row_values[col] else 0
+
+
+        stack = []
+
+        for col in range(width + 1):
+
+            current = heights[col] if col < width else 0
+            start = col
+
+            while stack and stack[-1][1] >= current:
+
+                start, top_height = stack.pop()
+                area = top_height * (col - start)
+
+                if area > best_area:
+                    best_area = area
+                    best_rect = (
+                        start,
+                        row - top_height + 1,
+                        col - start,
+                        top_height
+                    )
+
+            stack.append((start, current))
+
+    return best_rect
+
+
+def crop_to_rectangle(panorama, valid):
+    """
+    Обрезает панораму до ровного прямоугольника без чёрных полей.
+    """
+
+    height, width = valid.shape
+
+    scale = min(1.0, 500 / max(height, width))
+
+    small = cv2.resize(
+        valid.astype(np.uint8) * 255,
+        (max(1, int(width * scale)), max(1, int(height * scale))),
+        interpolation=cv2.INTER_AREA
+    ) >= 255
+
+    x, y, w, h = largest_inscribed_rectangle(small)
+
+    if w == 0 or h == 0:
+        return None
+
+    x0 = int(np.ceil(x / scale)) + 2
+    y0 = int(np.ceil(y / scale)) + 2
+    x1 = int(np.floor((x + w) / scale)) - 2
+    y1 = int(np.floor((y + h) / scale)) - 2
+
+    for _ in range(30):
+
+        if x1 <= x0 or y1 <= y0:
+            return None
+
+        if valid[y0:y1, x0:x1].all():
+            return panorama[y0:y1, x0:x1]
+
+        x0 += 1
+        y0 += 1
+        x1 -= 1
+        y1 -= 1
+
+    return None
 
 
 def render_panorama(images, transforms):
@@ -433,7 +539,7 @@ def render_panorama(images, transforms):
 
         mask = cv2.erode(mask, kernel)
 
-        # Feather:
+
         weight = cv2.distanceTransform(
             mask,
             cv2.DIST_L2,
@@ -449,6 +555,21 @@ def render_panorama(images, transforms):
     panorama[valid] = accumulator[valid] / weight_sum[valid][:, None]
     panorama = np.uint8(np.clip(panorama, 0, 255))
 
+    if CROP_TO_RECTANGLE:
+
+        cropped = crop_to_rectangle(panorama, valid)
+
+        if cropped is not None:
+
+            kept = cropped.shape[0] * cropped.shape[1] / valid.sum()
+
+    
+            if kept >= 0.10:
+                print(f"Обрезка до прямоугольника: оставлено {kept:.0%} панорамы")
+                return cropped
+
+        print("Не удалось обрезать до прямоугольника, обрезаю по краям")
+
     points = cv2.findNonZero(valid.astype(np.uint8))
 
     if points is not None:
@@ -456,6 +577,7 @@ def render_panorama(images, transforms):
         panorama = panorama[y:y + h, x:x + w]
 
     return panorama
+
 
 
 def build_panorama(images, names, results_folder=RESULTS_FOLDER):
@@ -495,7 +617,6 @@ def build_panorama(images, names, results_folder=RESULTS_FOLDER):
 
     print()
     print(f"Опорное (центральное) фото: {names[reference]}")
-
 
     total_matches = 0
     total_inliers = 0
@@ -543,6 +664,8 @@ def build_panorama(images, names, results_folder=RESULTS_FOLDER):
     return panorama, info
 
 
+
+
 def show_panorama(panorama):
 
     height, width = panorama.shape[:2]
@@ -562,6 +685,7 @@ def show_panorama(panorama):
 
     cv2.imshow(title, view)
 
+
     while True:
         key = cv2.waitKey(100)
 
@@ -572,6 +696,7 @@ def show_panorama(panorama):
             break
 
     cv2.destroyAllWindows()
+
 
 
 def select_images():
@@ -610,7 +735,7 @@ def select_images():
     root.update()
 
     try:
-
+    
         images = []
         names = []
 
@@ -628,7 +753,6 @@ def select_images():
             images.append(resize_image(image))
             names.append(os.path.basename(path))
 
-    
         try:
             panorama, info = build_panorama(images, names)
 
@@ -640,6 +764,8 @@ def select_images():
                 f"30-50% общего изображения."
             )
             return
+
+        
         output_path = os.path.join(
             RESULTS_FOLDER,
             "panorama_final.jpg"
@@ -692,7 +818,6 @@ def select_images():
     finally:
         button.config(state="normal")
         status_label.config(text="")
-
 
 
 
